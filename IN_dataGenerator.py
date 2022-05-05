@@ -10,15 +10,15 @@ import util
 import setGPU
 import glob
 import sys
-import tqdm
+#import tqdm
 import argparse
-
+import json
 #sys.path.insert(0, '/nfshome/jduarte/DL4Jets/mpi_learn/mpi_learn/train')
 print(torch.__version__)
 
 os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-test_path = '/storage/group/gpu/bigdata/BumbleB/convert_20181121_ak8_80x_deepDoubleB_db_pf_cpf_sv_dl4jets_test/'
-train_path = '/storage/group/gpu/bigdata/BumbleB/convert_20181121_ak8_80x_deepDoubleB_db_pf_cpf_sv_dl4jets_train_val/'
+test_path = 'dataset/test/'
+train_path = 'dataset/train/'
 NBINS = 40 # number of bins for loss function
 MMAX = 200. # max value
 MMIN = 40. # min value
@@ -103,19 +103,48 @@ def main(args):
     params_neu = params_1
     params = params_2
     params_sv = params_3
-    
+    model_dict = {}
     from data import H5Data
     files = glob.glob(train_path + "/newdata_*.h5")
     files_val = files[:5] # take first 5 for validation
     files_train = files[5:] # take rest for training
     
-    label = 'new'
     outdir = args.outdir
     vv_branch = args.vv_branch
     sv_branch = args.sv_branch
-    os.system('mkdir -p %s'%outdir)
+    drop_rate = args.drop_rate
+    load_def = args.load_def
+    
+    if args.drop_pfeatures != '':
+        drop_pfeatures = list(map(int, str(args.drop_pfeatures).split(',')))
+    else:
+        drop_pfeatures = []
 
-    batch_size = 128
+    if args.drop_svfeatures != '':
+        drop_svfeatures = list(map(int, str(args.drop_svfeatures).split(',')))
+    else:
+        drop_svfeatures = []
+    
+    label = args.label
+    if label == '' and drop_rate != 0:
+        label = 'new_DR' + str(int(drop_rate*100.0))
+    elif label == '' and drop_rate == 0:
+        label = 'new'
+    if len(drop_pfeatures) > 0:
+        print("The following particle candidate features to be dropped: ", drop_pfeatures)
+    if len(drop_svfeatures) > 0:
+        print("The following secondary vertex features to be dropped: ", drop_svfeatures)
+    n_epochs = args.epoch
+    batch_size = args.batch_size
+    os.system('mkdir -p %s'%outdir)
+    os.system('mkdir -p Model_Dicts/')
+    for arg in vars(args):
+        model_dict[arg] = getattr(args, arg)
+    f_model = open("Model_Dicts/gnn_{}_model_metadata.json".format(label), "w")
+    json.dump(model_dict, f_model, indent=3)
+    f_model.close()
+    
+
     data_train = H5Data(batch_size = batch_size,
                         cache = None,
                         preloading=0,
@@ -142,22 +171,75 @@ def main(args):
     from gnn import GraphNetAllParticle
     
     if sv_branch: 
-        gnn = GraphNet(N, n_targets, len(params), args.hidden, N_sv, len(params_sv),
-                   vv_branch=int(vv_branch),
-                   De=args.De,
-                   Do=args.Do)
+        gnn = GraphNet(n_constituents = N,
+                       n_targets = n_targets,
+                       params = len(params) - len(drop_pfeatures),
+                       hidden = args.hidden,
+                       n_vertices = N_sv,
+                       params_v = len(params_sv) - len(drop_svfeatures),
+                       vv_branch = int(vv_branch),
+                       De = args.De,
+                       Do = args.Do)
+       ### N = Number of charged particles (60)
+       ### n_targets = 2 (number of target_class)
+       ### hidden = number of nodes in hidden layers
+       ### params = number of features for each charged particle (30)
+       ### n_vertices = number of secondary vertices (5)
+       ### params_v = number of features for secondary vertices (14)
+       ### vv_branch = to allow vv_branch ? (0 or False by default)
+       ### De = Output dimension of particle-particle interaction NN (fR)
+       ### Do = Output dimension of pre-aggregator transformation NN (fO) 
     else: 
         gnn = GraphNetnoSV(N, n_targets, len(params), args.hidden,
                        De=args.De,
                        Do=args.Do)
+
     
-    #Architecture with all-particles
+    if load_def:
+        def_state_dict = torch.load("IN_training/gnn_new_DR0_best.pth")
+        new_state_dict = gnn.state_dict()
+        for key in def_state_dict.keys():
+            if key not in ['fr1_pv.weight', 'fr1.weight', 'fo1.weight']:
+                if new_state_dict[key].shape != def_state_dict[key].shape:
+                    print("Tensor shapes don't match for key='{}': old = ({},{}); new = ({},{}): not updating it".format(key,
+                                                                                                                         def_state_dict[key].shape[0],
+                                                                                                                         def_state_dict[key].shape[1],
+                                                                                                                         new_state_dict[key].shape[0],
+                                                                                                                         new_state_dict[key].shape[1]))
+                else:
+                    new_state_dict[key] = def_state_dict[key].clone()
+            else:
+                if key == 'fr1_pv.weight':
+                    indices_to_keep = [i for i in range(len(params)) if i not in drop_pfeatures] + \
+                                      [len(params) + i for i in range(len(params_sv)) if i not in drop_svfeatures]
+                    # new_state_dict[key] = def_state_dict[key][:,indices_to_keep].clone()
+                if key == 'fr1.weight':
+                    indices_to_keep = [i for i in range(len(params)) if i not in drop_pfeatures] + \
+                                      [len(params) + i for i in range(len(params)) if i not in drop_pfeatures]
+                    # new_state_dict[key] = def_state_dict[key][:,indices_to_keep].clone()
+                if key == 'fo1.weight':
+                    indices_to_keep = [i for i in range(len(params)) if i not in drop_pfeatures] + \
+                                      list(range(len(params), len(params)+2*args.De))
+                    
+                new_tensor = def_state_dict[key][:,indices_to_keep]
+                
+                if new_state_dict[key].shape != new_tensor.shape:
+                    print("Tensor shapes don't match for key='{}': modified old = ({},{}); new = ({},{}): not updating it".format(key,
+                                                                                                                                  new_tensor.shape[0],
+                                                                                                                                  new_tensor.shape[1],
+                                                                                                                                  new_state_dict[key].shape[0],
+                                                                                                                                  new_state_dict[key].shape[1]))
+
+                else:    
+                    new_state_dict[key] = new_tensor.clone()
+        gnn.load_state_dict(new_state_dict)
+            
+                                    
+                    #Architecture with all-particles
     #gnn = GraphNetAllParticle(N, N_neu, n_targets, len(params), len(params_neu), args.hidden, N_sv, len(params_sv),vv_branch=int(vv_branch), De=args.De, Do=args.Do) 
     
     # pre load best model
     #gnn.load_state_dict(torch.load('out/gnn_new_best.pth'))
-
-    n_epochs = 200
     
     loss = nn.CrossEntropyLoss(reduction='mean')
     optimizer = optim.Adam(gnn.parameters(), lr = 0.0001)
@@ -177,7 +259,7 @@ def main(args):
     from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score
     softmax = torch.nn.Softmax(dim=1)
     import time
-
+    
     for m in range(n_epochs):
         print("Epoch %s\n" % m)
         #torch.cuda.empty_cache()
@@ -187,16 +269,35 @@ def main(args):
         loss_training = []
         correct = []
         tic = time.perf_counter()
-        for sub_X,sub_Y,sub_Z in tqdm.tqdm(data_train.generate_data(),total=n_train/batch_size):
+        sig_count = 0
+        data_dropped = 0
+        for sub_X,sub_Y,sub_Z in data_train.generate_data():# tqdm.tqdm(,total=n_train/batch_size):
             training = sub_X[2]
-            #training_neu = sub_X[1]
             training_sv = sub_X[3]
             target = sub_Y[0]
             spec = sub_Z[0]
             trainingv = (torch.FloatTensor(training)).cuda()
-            #trainingv_neu = (torch.FloatTensor(training_neu)).cuda()
             trainingv_sv = (torch.FloatTensor(training_sv)).cuda()
             targetv = (torch.from_numpy(np.argmax(target, axis = 1)).long()).cuda()
+            if drop_rate > 0:
+                keep_indices = (targetv==0)
+                sig_count += batch_size - torch.sum(keep_indices).item()
+                to_turn_off = int((batch_size - torch.sum(keep_indices).item())*drop_rate)
+                psum = torch.cumsum(~keep_indices,0)
+                to_keep_after = torch.sum(psum <= to_turn_off).item()
+                keep_indices[to_keep_after:] = torch.Tensor([True]*(batch_size - to_keep_after))
+                data_dropped += batch_size - torch.sum(keep_indices).item()
+                trainingv = trainingv[keep_indices]
+                trainingv_sv = trainingv_sv[keep_indices]
+                targetv = targetv[keep_indices]
+            if len(drop_pfeatures) > 0:
+                keep_features = [i for i in np.arange(0, len(params), 1, dtype=int) if i not in drop_pfeatures]
+                # print(len(keep_features))
+                trainingv = trainingv[:,keep_features,:]
+            if len(drop_svfeatures) > 0:
+                keep_features = [i for i in np.arange(0, len(params_sv), 1, dtype=int) if i not in drop_svfeatures]
+                trainingv_sv = trainingv_sv[:,keep_features,:]
+            
             optimizer.zero_grad()
             #out = gnn(trainingv.cuda(), trainingv_sv.cuda())
             
@@ -212,19 +313,27 @@ def main(args):
             optimizer.step()
             loss_string = "Loss: %s" % "{0:.5f}".format(l.item())
             del trainingv, trainingv_sv, targetv
+        if drop_rate > 0.:
+            print("Signal Count: {}, Data Dropped: {}".format(sig_count, data_dropped))
         toc = time.perf_counter()
         print(f"Training done in {toc - tic:0.4f} seconds")
         tic = time.perf_counter()
-        for sub_X,sub_Y,sub_Z in tqdm.tqdm(data_val.generate_data(),total=n_val/batch_size):
+        for sub_X,sub_Y,sub_Z in data_val.generate_data(): #tqdm.tqdm(data_val.generate_data(),total=n_val/batch_size):
             training = sub_X[2]
-            #training_neu = sub_X[1]
             training_sv = sub_X[3]
             target = sub_Y[0]
             spec = sub_Z[0]
             trainingv = (torch.FloatTensor(training)).cuda()
-            #trainingv_neu = (torch.FloatTensor(training_neu)).cuda()
             trainingv_sv = (torch.FloatTensor(training_sv)).cuda()
             targetv = (torch.from_numpy(np.argmax(target, axis = 1)).long()).cuda()
+
+            if len(drop_pfeatures) > 0:
+                keep_features = [i for i in np.arange(0, len(params), 1, dtype=int) if i not in drop_pfeatures]
+                # print(len(keep_features))
+                trainingv = trainingv[:,keep_features,:]
+            if len(drop_svfeatures) > 0:
+                keep_features = [i for i in np.arange(0, len(params_sv), 1, dtype=int) if i not in drop_svfeatures]
+                trainingv_sv = trainingv_sv[:,keep_features,:]
             
             #Input validation dataset 
             if sv_branch: 
@@ -256,6 +365,8 @@ def main(args):
             print("new best model")
             l_val_best = l_val
             torch.save(gnn.state_dict(), '%s/gnn_%s_best.pth'%(outdir,label))
+            np.save('%s/validation_target_vals_%s.npy'%(outdir,label),val_targetv)
+            np.save('%s/validation_predicted_vals_%s.npy'%(outdir,label),predicted)
             
         print(val_targetv.shape, predicted.shape)
         print(val_targetv, predicted)
@@ -295,6 +406,13 @@ if __name__ == "__main__":
     parser.add_argument("--De", type=int, action='store', dest='De', default = 5, help="De")
     parser.add_argument("--Do", type=int, action='store', dest='Do', default = 6, help="Do")
     parser.add_argument("--hidden", type=int, action='store', dest='hidden', default = 15, help="hidden")
-
+    parser.add_argument("--drop-rate", type=float, action='store', dest='drop_rate', default = 0., help="Signal Drop rate")
+    parser.add_argument("--epoch", type=int, action='store', dest='epoch', default = 100, help="Epochs")
+    parser.add_argument("--drop-pfeatures", type=str, action='store', dest='drop_pfeatures', default = '', help="comma separated indices of the particle candidate features to be dropped")
+    parser.add_argument("--drop-svfeatures", type=str, action='store', dest='drop_svfeatures', default = '', help="comma separated indices of the secondary vertex features to be dropped")
+    parser.add_argument("--label", type=str, action='store', dest='label', default = '', help="a label for the model")
+    parser.add_argument("--batch-size", type=int, action='store', dest='batch_size', default = 128, help="batch_size")
+    parser.add_argument("--load-def", action='store_true', dest='load_def', default = False, help="Load weights from default model if enabled")
+    
     args = parser.parse_args()
     main(args)
