@@ -132,23 +132,23 @@ def main(args, save_path='', evaluating_test=True):
     
     if evaluating_test:
         
-        for test_file in sorted(glob.glob(save_path + 'test_*_features_1.npy')):
+        for test_file in sorted(glob.glob(save_path + 'test_0_features_1.npy')):
             test_1_arrays.append(np.load(test_file))  
         test_1 = np.concatenate(test_1_arrays)
         
-        for test_file in sorted(glob.glob(save_path + 'test_*_features_2.npy')):
+        for test_file in sorted(glob.glob(save_path + 'test_0_features_2.npy')):
             test_2_arrays.append(np.load(test_file))  
         test_2 = np.concatenate(test_2_arrays)
 
-        for test_file in sorted(glob.glob(save_path + 'test_*_features_3.npy')):
+        for test_file in sorted(glob.glob(save_path + 'test_0_features_3.npy')):
             test_3_arrays.append(np.load(test_file))
         test_3 = np.concatenate(test_3_arrays)
 
-        for test_file in sorted(glob.glob(save_path + 'test_*_spectators_0.npy')):
+        for test_file in sorted(glob.glob(save_path + 'test_0_spectators_0.npy')):
             test_spec_arrays.append(np.load(test_file))
         test_spec = np.concatenate(test_spec_arrays)
 
-        for test_file in sorted(glob.glob(save_path + 'test_*_truth_0.npy')):
+        for test_file in sorted(glob.glob(save_path + 'test_0_truth_0.npy')):
             target_test_arrays.append(np.load(test_file))
         target_test = np.concatenate(target_test_arrays)
 
@@ -276,6 +276,25 @@ def main(args, save_path='', evaluating_test=True):
     print(target_test.shape, prediction.shape)
     auc = roc_auc_score(target_test[:,1], prediction[:,1])
     print("AUC: ", auc)
+    idx_0 = target_test[:,1] == 0
+    idx_1 = target_test[:,1] == 1
+    # acc = (np.sum(prediction[:,1][idx_0] < 0.5) + np.sum(prediction[:,1][idx_1] >= 0.5))/prediction[:,1].size
+    acc = accuracy_score(target_test[:,0], prediction[:,0]>=0.5) 
+    print("Accuray: ", acc)
+    ## checking the sums
+    target_sums = np.sum(target_test,1)
+    prediction_sums = np.sum(prediction, 1)
+    idx = target_sums == 1
+    print("Total: {}, Target: {}, Pred: {}".format(np.sum(idx), np.sum(target_sums[idx]), np.sum(prediction_sums[idx])))
+    auc = roc_auc_score(target_test[idx][:,1], prediction[idx][:,1])
+    print("AUC: ", auc)
+    acc = accuracy_score(target_test[idx][:,0], prediction[idx][:,0]>=0.5) 
+    print("Accuray 0: ", acc)
+    acc = accuracy_score(target_test[idx][:,1], prediction[idx][:,1]>=0.5) 
+    print("Accuray 1: ", acc)
+    idx_bar = target_sums != 1
+    print(target_test[idx_bar][0:10,:])
+    
     # if evaluating_test:
     #     np.save('%s/truth_%s.npy'%(outdir,label),prediction)
     #     np.save('%s/prediction_%s.npy'%(outdir,label),prediction)
